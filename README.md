@@ -1,2 +1,2 @@
-# bhumix
+# Bhumix
 Internal SIH 2026
