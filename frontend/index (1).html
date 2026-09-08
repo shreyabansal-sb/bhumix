@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bhumix — Land Record Digitization</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <h1>Bhumix</h1>
+    <div class="file-ref">Land Record Register<br>Scan · Translate · Verify</div>
+  </header>
+  <p class="subtitle">Upload a scanned land record. It will be read automatically, translated into the language you choose, and held for review before anything is finalized.</p>
+
+  <div class="stepper" id="stepper"></div>
+
+  <!-- STEP 1+2: Language + Upload -->
+  <div class="panel" id="panel-input">
+    <h2>1. Document details</h2>
+    <p class="hint">Choose the document's language and the language you'd like it translated into, then upload the scan.</p>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="sourceLang">Document language</label>
+        <select id="sourceLang"></select>
+      </div>
+      <div class="field">
+        <label for="targetLang">Translate to</label>
+        <select id="targetLang"></select>
+      </div>
+    </div>
+
+    <div style="margin-top:20px;">
+      <label style="display:block; font-size:12.5px; font-weight:500; color:var(--ink-soft); margin-bottom:6px;">Document</label>
+      <div class="dropzone" id="dropzone" tabindex="0">
+        <div class="dz-title" id="dzTitle">Click to select, or drop a file here</div>
+        <div class="dz-sub">JPG, PNG, TIFF or PDF</div>
+        <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.tif,.tiff,.pdf" />
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="scanBtn" disabled>Scan document</button>
+    </div>
+
+    <div id="scanLoading" class="loading-box" style="display:none;">
+      <div class="spinner"></div>
+      <span>Reading the document — this can take up to a minute if the service has been idle.</span>
+    </div>
+    <div id="scanError" class="error-box" style="display:none;"></div>
+  </div>
+
+  <!-- STEP 3: Translating -->
+  <div id="translateLoading" class="loading-box" style="display:none;">
+    <div class="spinner"></div>
+    <span>Translating extracted fields…</span>
+  </div>
+  <div id="translateError" class="error-box" style="display:none;"></div>
+
+  <!-- STEP 4: Results / Review -->
+  <div class="panel" id="panel-results" style="display:none;">
+    <h2>2. Review extracted record</h2>
+    <p class="hint">Original values are editable — correct anything the scan got wrong before approving. Translated values are shown for reference alongside.</p>
+
+    <div class="ledger" id="ledgerBody"></div>
+    <div class="notes-block" id="notesBlock" style="display:none;">
+      <div class="fname">Notes</div>
+      <div class="notes-grid">
+        <textarea id="notesOrig"></textarea>
+        <div class="val-trans-text textarea" id="notesTrans"></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="approve" id="approveBtn">Approve record</button>
+      <button class="secondary" id="rejectBtn">Start over</button>
+    </div>
+
+    <div id="approvedBanner" class="approved-banner" style="display:none;">
+      <div class="seal-mark">✓</div>
+      <div>
+        <div>Record approved.</div>
+        <div style="font-weight:400; font-size:12.5px; color:var(--ink-soft); margin-top:2px;" id="approvedMeta"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="note">
+    Original scans are never overwritten — every approval and correction is kept as a separate entry in the record's history.
+  </footer>
+
+</div>
+
+<script>
+const SCAN_URL = "https://bhumix-scan.onrender.com";
+const TRANSLATE_URL = "https://bhumix-traslation.onrender.com";
+
+const LANGS = [
+  ["en-IN", "English"], ["hi-IN", "Hindi"], ["bn-IN", "Bengali"],
+  ["ta-IN", "Tamil"], ["te-IN", "Telugu"], ["mr-IN", "Marathi"],
+  ["gu-IN", "Gujarati"], ["kn-IN", "Kannada"], ["ml-IN", "Malayalam"],
+  ["pa-IN", "Punjabi"], ["od-IN", "Odia"],
+];
+
+const FIELD_LABELS = {
+  owner_name: "Owner Name",
+  khasra_no: "Khasra No.",
+  khata_no: "Khata No.",
+  survey_no: "Survey No.",
+  village: "Village",
+  tehsil: "Tehsil",
+  district: "District",
+  plot_area: "Plot Area",
+  land_classification: "Land Classification",
+};
+const FIELD_ORDER = ["owner_name","khasra_no","khata_no","survey_no","village","tehsil","district","plot_area","land_classification"];
+
+let state = {
+  stage: "input", // input | scanning | translating | review | approved
+  file: null,
+  scanResult: null,
+  finalResult: null,
+};
+
+// ---- populate language dropdowns ----
+const sourceSel = document.getElementById("sourceLang");
+const targetSel = document.getElementById("targetLang");
+LANGS.forEach(([code, name]) => {
+  sourceSel.appendChild(new Option(name, code));
+  targetSel.appendChild(new Option(name, code));
+});
+sourceSel.value = "hi-IN";
+targetSel.value = "en-IN";
+
+// ---- stepper ----
+const STEPS = [
+  { key: "input", label: "Language & upload" },
+  { key: "scan", label: "Scan" },
+  { key: "review", label: "Review" },
+  { key: "approved", label: "Approve" },
+];
+function stageIndex() {
+  return { input: 0, scanning: 0, translating: 1, review: 2, approved: 3 }[state.stage] ?? 0;
+}
+function renderStepper() {
+  const el = document.getElementById("stepper");
+  const current = stageIndex();
+  el.innerHTML = "";
+  STEPS.forEach((s, i) => {
+    const stepEl = document.createElement("div");
+    stepEl.className = "step" + (i === current ? " active" : i < current ? " done" : "");
+    stepEl.innerHTML = `<span class="dot">${i < current ? "✓" : i + 1}</span><span class="label">${s.label}</span>`;
+    el.appendChild(stepEl);
+    if (i < STEPS.length - 1) {
+      const line = document.createElement("div");
+      line.className = "step-line";
+      el.appendChild(line);
+    }
+  });
+}
+renderStepper();
+
+// ---- file selection ----
+const dropzone = document.getElementById("dropzone");
+const fileInput = document.getElementById("fileInput");
+const dzTitle = document.getElementById("dzTitle");
+const scanBtn = document.getElementById("scanBtn");
+
+dropzone.addEventListener("click", () => fileInput.click());
+dropzone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") fileInput.click(); });
+dropzone.addEventListener("dragover", (e) => e.preventDefault());
+dropzone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", (e) => {
+  if (e.target.files[0]) setFile(e.target.files[0]);
+});
+function setFile(f) {
+  state.file = f;
+  dzTitle.textContent = f.name;
+  dropzone.classList.add("has-file");
+  scanBtn.disabled = false;
+}
+
+// ---- scan ----
+scanBtn.addEventListener("click", runScan);
+
+async function runScan() {
+  hideError("scanError");
+  document.getElementById("scanLoading").style.display = "flex";
+  scanBtn.disabled = true;
+  state.stage = "scanning";
+  renderStepper();
+
+  try {
+    const formData = new FormData();
+    formData.append("file", state.file);
+    const res = await fetch(`${SCAN_URL}/extract`, { method: "POST", body: formData });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "The scan service couldn't read this document.");
+    state.scanResult = body;
+    document.getElementById("scanLoading").style.display = "none";
+    await runTranslate();
+  } catch (err) {
+    document.getElementById("scanLoading").style.display = "none";
+    scanBtn.disabled = false;
+    state.stage = "input";
+    renderStepper();
+    showError("scanError", err.message || "Something went wrong while scanning. Try again.");
+  }
+}
+
+// ---- translate ----
+async function runTranslate() {
+  hideError("translateError");
+  document.getElementById("translateLoading").style.display = "flex";
+  state.stage = "translating";
+  renderStepper();
+
+  try {
+    const res = await fetch(`${TRANSLATE_URL}/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scan_result: state.scanResult,
+        source_lang: sourceSel.value,
+        target_lang: targetSel.value,
+      }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "Translation failed for this record.");
+    state.finalResult = body;
+    document.getElementById("translateLoading").style.display = "none";
+    state.stage = "review";
+    renderStepper();
+    renderResults();
+  } catch (err) {
+    document.getElementById("translateLoading").style.display = "none";
+    state.stage = "input";
+    scanBtn.disabled = false;
+    renderStepper();
+    showError("translateError", err.message || "Something went wrong while translating. Try again.");
+  }
+}
+
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.style.display = "flex";
+}
+function hideError(id) {
+  document.getElementById(id).style.display = "none";
+}
+
+// ---- render results (ledger) ----
+function renderResults() {
+  document.getElementById("panel-results").style.display = "block";
+  const ledger = document.getElementById("ledgerBody");
+  ledger.innerHTML = `
+    <div class="ledger-row head">
+      <div>Field</div><div>Original</div><div>Translated</div>
+    </div>`;
+
+  FIELD_ORDER.forEach((key) => {
+    const f = state.finalResult[key];
+    if (!f) return;
+    const row = document.createElement("div");
+    row.className = "ledger-row";
+
+    const confClass = f.confidence === 0 || f.value === null ? "none" : f.confidence < 0.7 ? "low" : "high";
+    const confLabel = f.value === null ? "not found" : `${Math.round(f.confidence * 100)}% confidence`;
+
+    row.innerHTML = `
+      <div class="fname">${FIELD_LABELS[key] || key}</div>
+      <div class="val-orig">
+        <input type="text" value="${f.value ?? ""}" placeholder="—" data-field="${key}" />
+        <div class="confidence ${confClass}">${confLabel}</div>
+      </div>
+      <div class="val-trans">
+        <div class="val-trans-text">${f.translated_value ?? '<span class="empty-val">—</span>'}</div>
+      </div>
+    `;
+    ledger.appendChild(row);
+  });
+
+  // notes
+  const notesBlock = document.getElementById("notesBlock");
+  if (state.finalResult.notes || state.finalResult.notes_translated) {
+    notesBlock.style.display = "block";
+    document.getElementById("notesOrig").value = state.finalResult.notes || "";
+    document.getElementById("notesTrans").textContent = state.finalResult.notes_translated || "—";
+  } else {
+    notesBlock.style.display = "none";
+  }
+
+  document.getElementById("approveBtn").disabled = false;
+  document.getElementById("approvedBanner").style.display = "none";
+}
+
+// ---- approve / reject ----
+document.getElementById("approveBtn").addEventListener("click", () => {
+  // Collect any corrections the reviewer made
+  const corrected = {};
+  document.querySelectorAll("[data-field]").forEach((input) => {
+    corrected[input.dataset.field] = input.value;
+  });
+  corrected.notes = document.getElementById("notesOrig").value;
+
+  // NOTE: no /approve endpoint was provided in the integration guide —
+  // this should POST `corrected` (plus the translated record) to the
+  // records-save endpoint once it exists. Wiring that in is the one
+  // piece left to connect.
+  state.stage = "approved";
+  renderStepper();
+
+  document.querySelectorAll("[data-field], #notesOrig").forEach((el) => (el.disabled = true));
+  document.getElementById("approveBtn").disabled = true;
+
+  const banner = document.getElementById("approvedBanner");
+  banner.style.display = "flex";
+  document.getElementById("approvedMeta").textContent =
+    `${sourceSel.options[sourceSel.selectedIndex].text} → ${targetSel.options[targetSel.selectedIndex].text} · ${new Date().toLocaleString()}`;
+});
+
+document.getElementById("rejectBtn").addEventListener("click", () => {
+  state = { stage: "input", file: null, scanResult: null, finalResult: null };
+  document.getElementById("panel-results").style.display = "none";
+  document.getElementById("approvedBanner").style.display = "none";
+  dzTitle.textContent = "Click to select, or drop a file here";
+  dropzone.classList.remove("has-file");
+  fileInput.value = "";
+  scanBtn.disabled = true;
+  renderStepper();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+</script>
+
+</body>
+</html>
